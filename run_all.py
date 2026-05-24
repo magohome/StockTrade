@@ -6,7 +6,7 @@ run_all.py
   步骤 1  pipeline/fetch_kline.py   — 拉取最新 K 线数据
   步骤 2  pipeline/cli.py preselect — 量化初选，生成候选列表
   步骤 3  dashboard/export_kline_charts.py — 导出候选股 K 线图
-  步骤 4  agent/gemini_review.py    — Gemini 图表分析评分
+  步骤 4  agent/*_review.py         — AI 图表分析评分
   步骤 5  打印推荐购买的股票
 
 用法：
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -99,6 +100,12 @@ def main() -> None:
         "--start-from", type=int, default=1, metavar="N",
         help="从第 N 步开始执行（1~4），跳过前面的步骤",
     )
+    parser.add_argument(
+        "--reviewer",
+        choices=("kimi", "gemini"),
+        default=os.environ.get("AI_REVIEWER", "kimi"),
+        help="AI 图表复评引擎（默认 kimi，可用环境变量 AI_REVIEWER 覆盖）",
+    )
     args = parser.parse_args()
 
     start = args.start_from
@@ -127,11 +134,15 @@ def main() -> None:
             [PYTHON, str(ROOT / "dashboard" / "export_kline_charts.py")],
         )
 
-    # ── 步骤 4：Gemini 图表分析 ──────────────────────────────────────
+    # ── 步骤 4：AI 图表分析 ─────────────────────────────────────────
     if start <= 4:
+        review_script = {
+            "kimi": ROOT / "agent" / "kimi_review.py",
+            "gemini": ROOT / "agent" / "gemini_review.py",
+        }[args.reviewer]
         _run(
-            "4/4  Gemini 图表分析（gemini_review）",
-            [PYTHON, str(ROOT / "agent" / "gemini_review.py")],
+            f"4/4  AI 图表分析（{args.reviewer}_review）",
+            [PYTHON, str(review_script)],
         )
 
     # ── 步骤 5：打印推荐结果 ─────────────────────────────────────────

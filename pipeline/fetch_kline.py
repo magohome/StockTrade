@@ -7,9 +7,11 @@ import sys
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 import os
+import threading
 
 import pandas as pd
 import tushare as ts
@@ -85,6 +87,9 @@ logger = logging.getLogger("fetch_from_stocklist")
 
 # --------------------------- 限流/封禁处理配置 --------------------------- #
 COOLDOWN_SECS = 600
+REQUEST_INTERVAL_SECS = 0.4
+_REQUEST_LOCK = threading.Lock()
+_LAST_REQUEST_TS = 0.0
 BAN_PATTERNS = (
     "访问频繁", "请稍后", "超过频率", "频繁访问",
     "too many requests", "429",
@@ -100,11 +105,31 @@ class RateLimitError(RuntimeError):
     """表示命中限流/封禁，需要长时间冷却后重试。"""
     pass
 
+
+@dataclass
+class FetchResult:
+    code: str
+    ok: bool
+    rows: int = 0
+    status: str = "ok"
+    error: str = ""
+
 def _cool_sleep(base_seconds: int) -> None:
     jitter = random.uniform(0.9, 1.2)
     sleep_s = max(1, int(base_seconds * jitter))
     logger.warning("疑似被限流/封禁，进入冷却期 %d 秒...", sleep_s)
     time.sleep(sleep_s)
+
+def _wait_for_request_slot() -> None:
+    global _LAST_REQUEST_TS
+    if REQUEST_INTERVAL_SECS <= 0:
+        return
+    with _REQUEST_LOCK:
+        now = time.monotonic()
+        wait_s = REQUEST_INTERVAL_SECS - (now - _LAST_REQUEST_TS)
+        if wait_s > 0:
+            time.sleep(wait_s)
+        _LAST_REQUEST_TS = time.monotonic()
 
 # --------------------------- 历史K线（Tushare 日线，固定qfq） --------------------------- #
 pro: Optional[ts.pro_api] = None  # 模块级会话
@@ -128,6 +153,7 @@ def _to_ts_code(code: str) -> str:
 def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
     ts_code = _to_ts_code(code)
     try:
+        _wait_for_request_slot()
         df = ts.pro_bar(
             ts_code=ts_code,
             adj="qfq",
@@ -162,6 +188,48 @@ def validate(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("数据包含未来日期，可能抓取错误！")
     return df
 
+
+def _validate_fetched_frame(
+    code: str,
+    df: pd.DataFrame,
+    *,
+    min_rows: int,
+    allow_empty: bool,
+) -> pd.DataFrame:
+    df = validate(df)
+    if df is None or df.empty:
+        if allow_empty:
+            return pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
+        raise ValueError(f"{code} 返回空数据")
+    if len(df) < min_rows:
+        raise ValueError(f"{code} 行数不足：{len(df)} < {min_rows}")
+    return df
+
+
+def _atomic_write_csv(df: pd.DataFrame, csv_path: Path) -> None:
+    tmp_path = csv_path.with_suffix(csv_path.suffix + ".tmp")
+    df.to_csv(tmp_path, index=False)
+    os.replace(tmp_path, csv_path)
+
+
+def _existing_csv_is_valid(csv_path: Path, *, min_rows: int, allow_empty: bool) -> bool:
+    if not csv_path.exists():
+        return False
+    try:
+        df = pd.read_csv(csv_path)
+        if df.empty:
+            return allow_empty
+        df.columns = [c.lower() for c in df.columns]
+        required = {"date", "open", "close", "high", "low", "volume"}
+        if not required.issubset(df.columns):
+            return False
+        df["date"] = pd.to_datetime(df["date"])
+        _validate_fetched_frame(csv_path.stem, df, min_rows=min_rows, allow_empty=allow_empty)
+        return True
+    except Exception as e:
+        logger.warning("%s 已有文件校验失败，将重新抓取：%s", csv_path.name, e)
+        return False
+
 # --------------------------- 读取 stocklist.csv & 过滤板块 --------------------------- #
 
 def _filter_by_boards_stocklist(df: pd.DataFrame, exclude_boards: set[str]) -> pd.DataFrame:
@@ -194,19 +262,31 @@ def fetch_one(
     start: str,
     end: str,
     out_dir: Path,
-):
+    *,
+    min_rows: int = 1,
+    allow_empty: bool = False,
+    skip_existing: bool = True,
+) -> FetchResult:
     csv_path = out_dir / f"{code}.csv"
+
+    if skip_existing and _existing_csv_is_valid(csv_path, min_rows=min_rows, allow_empty=allow_empty):
+        return FetchResult(code=code, ok=True, rows=-1, status="skipped_existing")
+
+    last_error = ""
 
     for attempt in range(1, 4):
         try:
             new_df = _get_kline_tushare(code, start, end)
-            if new_df.empty:
-                logger.debug("%s 无数据，生成空表。", code)
-                new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
-            new_df = validate(new_df)
-            new_df.to_csv(csv_path, index=False)  # 直接覆盖保存
-            break
+            new_df = _validate_fetched_frame(
+                code,
+                new_df,
+                min_rows=min_rows,
+                allow_empty=allow_empty,
+            )
+            _atomic_write_csv(new_df, csv_path)
+            return FetchResult(code=code, ok=True, rows=len(new_df), status="downloaded")
         except Exception as e:
+            last_error = str(e)
             if _looks_like_ip_ban(e):
                 logger.error(f"{code} 第 {attempt} 次抓取疑似被封禁，沉睡 {COOLDOWN_SECS} 秒")
                 _cool_sleep(COOLDOWN_SECS)
@@ -216,6 +296,56 @@ def fetch_one(
                 time.sleep(silent_seconds)
     else:
         logger.error("%s 三次抓取均失败，已跳过！", code)       
+        return FetchResult(code=code, ok=False, status="failed", error=last_error)
+
+
+def _success_rate(results: list[FetchResult]) -> float:
+    return sum(1 for r in results if r.ok) / len(results) if results else 0.0
+
+
+def _write_failure_report(results: list[FetchResult], report_path: Path) -> None:
+    failed = [r for r in results if not r.ok]
+    if not failed:
+        return
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([r.__dict__ for r in failed]).to_csv(report_path, index=False)
+    logger.error("失败清单已写入：%s", report_path.resolve())
+
+
+def _run_fetch_batch(
+    codes: list[str],
+    *,
+    start: str,
+    end: str,
+    out_dir: Path,
+    workers: int,
+    min_rows: int,
+    allow_empty: bool,
+    skip_existing: bool,
+    desc: str,
+) -> list[FetchResult]:
+    results: list[FetchResult] = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(
+                fetch_one,
+                code,
+                start,
+                end,
+                out_dir,
+                min_rows=min_rows,
+                allow_empty=allow_empty,
+                skip_existing=skip_existing,
+            )
+            for code in codes
+        ]
+        for fut in tqdm(as_completed(futures), total=len(futures), desc=desc):
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                logger.exception("抓取线程出现未捕获异常：%s", e)
+                results.append(FetchResult(code="unknown", ok=False, status="crashed", error=str(e)))
+    return results
 
 
 
@@ -276,21 +406,89 @@ def main(log_path: Optional[Path] = None):
         len(codes), start, end, ",".join(sorted(exclude_boards)) or "无",
     )
 
-    # ---------- 多线程抓取（全量覆盖） ---------- #
+    # ---------- 抓取有效性与断点配置 ---------- #
     workers = int(cfg.get("workers", 8))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [
-            executor.submit(
-                fetch_one,
-                code,
-                start,
-                end,
-                out_dir,
+    global REQUEST_INTERVAL_SECS
+    REQUEST_INTERVAL_SECS = float(cfg.get("request_interval_seconds", REQUEST_INTERVAL_SECS))
+    min_rows = int(cfg.get("min_rows", 1))
+    allow_empty = bool(cfg.get("allow_empty", False))
+    skip_existing = bool(cfg.get("skip_existing", True))
+    min_success_rate = float(cfg.get("min_success_rate", 0.95))
+    preflight_enabled = bool(cfg.get("preflight_enabled", True))
+    preflight_count = max(0, int(cfg.get("preflight_count", 5)))
+    preflight_min_success_rate = float(cfg.get("preflight_min_success_rate", 0.8))
+    failure_report = _resolve_cfg_path(cfg.get("failure_report", "data/logs/fetch_failures.csv"))
+    logger.info("Tushare 请求间隔：%.2f 秒（全线程共享）", REQUEST_INTERVAL_SECS)
+
+    if preflight_enabled and preflight_count > 0:
+        sample_codes = codes[: min(preflight_count, len(codes))]
+        logger.info(
+            "开始预检：先抓取 %d 支样本，成功率需 ≥ %.0f%%",
+            len(sample_codes),
+            preflight_min_success_rate * 100,
+        )
+        preflight_results = _run_fetch_batch(
+            sample_codes,
+            start=start,
+            end=end,
+            out_dir=out_dir,
+            workers=min(workers, len(sample_codes)),
+            min_rows=min_rows,
+            allow_empty=allow_empty,
+            skip_existing=skip_existing,
+            desc="预检进度",
+        )
+        preflight_rate = _success_rate(preflight_results)
+        logger.info(
+            "预检完成：成功 %d/%d，成功率 %.1f%%",
+            sum(1 for r in preflight_results if r.ok),
+            len(preflight_results),
+            preflight_rate * 100,
+        )
+        if preflight_rate < preflight_min_success_rate:
+            _write_failure_report(preflight_results, failure_report)
+            logger.error(
+                "预检未通过，已中止全量抓取。请先检查 token、网络、Tushare 权限或日期区间。"
             )
-            for code in codes
-        ]
-        for _ in tqdm(as_completed(futures), total=len(futures), desc="下载进度"):
-            pass
+            sys.exit(1)
+
+    # ---------- 多线程抓取（支持跳过已有有效文件 + 失败汇总） ---------- #
+    results = _run_fetch_batch(
+        codes,
+        start=start,
+        end=end,
+        out_dir=out_dir,
+        workers=workers,
+        min_rows=min_rows,
+        allow_empty=allow_empty,
+        skip_existing=skip_existing,
+        desc="下载进度",
+    )
+    ok_count = sum(1 for r in results if r.ok)
+    failed_count = len(results) - ok_count
+    success_rate = _success_rate(results)
+    skipped_count = sum(1 for r in results if r.status == "skipped_existing")
+
+    logger.info(
+        "抓取完成：成功 %d/%d，失败 %d，跳过已有 %d，成功率 %.1f%%",
+        ok_count,
+        len(results),
+        failed_count,
+        skipped_count,
+        success_rate * 100,
+    )
+    if failed_count:
+        _write_failure_report(results, failure_report)
+        for r in [item for item in results if not item.ok][:20]:
+            logger.error("失败样例：%s | %s", r.code, r.error)
+
+    if success_rate < min_success_rate:
+        logger.error(
+            "成功率 %.1f%% 低于配置门槛 %.1f%%，流程中止，避免用不完整数据继续初选。",
+            success_rate * 100,
+            min_success_rate * 100,
+        )
+        sys.exit(1)
 
     logger.info("全部任务完成，数据已保存至 %s", out_dir.resolve())
 

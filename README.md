@@ -5,7 +5,7 @@
 - 使用 Tushare 拉取股票日线数据
 - 用量化规则做初选（目前只实现了B1选股）
 - 导出候选股票 K 线图
-- 调用 Gemini 对图表进行 AI 复评打分
+- 调用 Kimi/Gemini 对图表进行 AI 复评打分
 
 ---
 
@@ -24,7 +24,7 @@
 1. 下载 K 线数据（pipeline.fetch_kline）
 2. 量化初选（pipeline.cli preselect）
 3. 导出候选图表（dashboard/export_kline_charts.py）
-4. Gemini 复评（agent/gemini_review.py）
+4. AI 复评（默认 agent/kimi_review.py，可切换 Gemini）
 5. 打印推荐结果（读取 suggestion.json）
 
 输出主链路：
@@ -40,8 +40,8 @@
 
 - [pipeline](pipeline)：数据抓取与量化初选
 - [dashboard](dashboard)：看盘界面与图表导出
-- [agent](agent)：LLM 评审逻辑（Gemini）
-- [config](config)：抓取、初选、Gemini 复评配置
+- [agent](agent)：LLM 评审逻辑（Kimi/Gemini）
+- [config](config)：抓取、初选、AI 复评配置
 - [data](data)：运行数据与结果
 - [run_all.py](run_all.py)：全流程一键入口
 
@@ -68,10 +68,19 @@ Windows PowerShell（永久写入）：
 
 ~~~powershell
 [Environment]::SetEnvironmentVariable("TUSHARE_TOKEN", "你的TushareToken", "User")
-[Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "你的GeminiApiKey", "User")
+[Environment]::SetEnvironmentVariable("MOONSHOT_API_KEY", "你的KimiApiKey", "User")
+[Environment]::SetEnvironmentVariable("AI_REVIEWER", "kimi", "User")
 ~~~
 
 写入后请重开终端，环境变量才会在新会话中生效。
+
+macOS / Linux：
+
+~~~bash
+export TUSHARE_TOKEN="你的TushareToken"
+export MOONSHOT_API_KEY="你的KimiApiKey"
+export AI_REVIEWER="kimi"
+~~~
 
 ### 3.4 运行一键脚本
 
@@ -86,12 +95,15 @@ python run_all.py
 ~~~bash
 python run_all.py --skip-fetch
 python run_all.py --start-from 3
+python run_all.py --reviewer kimi
+python run_all.py --reviewer gemini
 ~~~
 
 参数说明：
 
 - --skip-fetch：跳过数据下载，直接进入初选
 - --start-from N：从第 N 步开始执行（1 到 4）
+- --reviewer：选择 AI 复评引擎，支持 kimi / gemini，默认 kimi
 
 ---
 
@@ -110,6 +122,10 @@ python -m pipeline.fetch_kline
 - exclude_boards：排除板块（gem、star、bj）
 - out：输出目录（默认 data/raw）
 - workers：并发线程数
+- preflight_enabled、preflight_count：全量前先抓小样本，预检失败会直接中止
+- skip_existing：跳过已有且校验通过的 CSV，支持断点续跑
+- min_success_rate：全量抓取成功率低于该值时中止后续流程
+- failure_report：失败股票清单输出路径
 
 ### 步骤 2：量化初选
 
@@ -134,19 +150,21 @@ python dashboard/export_kline_charts.py
 
 输出到 data/kline/选股日期，图像命名为 代码_day.jpg。
 
-### 步骤 4：Gemini 图表复评
+### 步骤 4：AI 图表复评
 
 ~~~bash
+python agent/kimi_review.py
 python agent/gemini_review.py
 ~~~
 
 可选参数示例：
 
 ~~~bash
+python agent/kimi_review.py --config config/kimi_review.yaml
 python agent/gemini_review.py --config config/gemini_review.yaml
 ~~~
 
-配置见 [config/gemini_review.yaml](config/gemini_review.yaml)。
+配置见 [config/kimi_review.yaml](config/kimi_review.yaml) 或 [config/gemini_review.yaml](config/gemini_review.yaml)。
 
 读取候选与图表后，输出：
 
@@ -160,6 +178,9 @@ python agent/gemini_review.py --config config/gemini_review.yaml
 ### 6.1 抓取层
 
 - 首次全量抓取建议 workers 设小一些（如 4 到 8）
+- 保持 preflight_enabled: true，先验证 token、权限、字段和网络可用
+- 开启 skip_existing 后，失败重跑只会补抓缺失或无效 CSV
+- 根据容忍度调整 min_success_rate，低于门槛会停止后续初选
 - 若遇到频率限制，降低并发并重试
 
 ### 6.2 初选层
@@ -170,7 +191,7 @@ python agent/gemini_review.py --config config/gemini_review.yaml
 
 ### 6.3 复评层
 
-在 [config/gemini_review.yaml](config/gemini_review.yaml) 中可调整：
+在 [config/kimi_review.yaml](config/kimi_review.yaml) / [config/gemini_review.yaml](config/gemini_review.yaml) 中可调整：
 
 - model：模型名称
 - request_delay：调用间隔（防限流）
@@ -210,9 +231,10 @@ data/review/日期/suggestion.json
 - 确认已安装 kaleido
 - 重新安装：pip install -U kaleido
 
-### Q3：Gemini 运行失败
+### Q3：AI 复评运行失败
 
-- 检查 GEMINI_API_KEY 是否设置
+- Kimi 检查 MOONSHOT_API_KEY 是否设置
+- Gemini 检查 GEMINI_API_KEY 是否设置，并用 python run_all.py --reviewer gemini 切换
 - 观察是否命中限流，可提高 request_delay
 
 ### Q4：没有候选股票

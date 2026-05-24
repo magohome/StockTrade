@@ -1,9 +1,12 @@
 numba==0.64.0
 numpy==2.4.3
+openai==2.8.1
 pandas==3.0.1
 plotly==6.5.0
 protobuf==7.34.0
 PyYAML==6.0.3
-streamlit==1.55.0
+streamlit==1.57.0
 tqdm==4.67.3
 tushare==1.4.25
+google-genai==1.54.0
+kaleido==1.2.0

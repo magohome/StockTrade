@@ -15,12 +15,32 @@ stocklist: "./pipeline/stocklist.csv"
 #   bj   — 北交所（4/8 开头，后缀 .BJ）
 # 如需全部保留，设为空列表 []
 exclude_boards:
-  - gem
-  - star
   - bj
 
 # K线数据输出目录
 out: "./data/raw"
 
 # 并发下载线程数
-workers: 8
+workers: 2
+
+# Tushare 限流保护：adj_factor 免费/常见权限为 200 次/分钟。
+# 0.4 秒约等于 150 次/分钟，给网络抖动和重试留余量。
+request_interval_seconds: 0.4
+
+# true: 已存在且通过校验的 CSV 不重复抓取，便于断点续跑
+skip_existing: true
+
+# 数据有效性门槛
+min_rows: 1
+allow_empty: false
+
+# 全量抓取成功率低于该值时退出，避免后续用残缺数据初选
+min_success_rate: 0.95
+
+# 全量抓取前先抽样预检，避免跑很久后才发现 token/权限/网络失败
+preflight_enabled: true
+preflight_count: 5
+preflight_min_success_rate: 0.8
+
+# 抓取失败清单
+failure_report: "./data/logs/fetch_failures.csv"

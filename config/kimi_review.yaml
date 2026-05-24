@@ -1,0 +1,29 @@
+# kimi_review.yaml
+# Kimi 图表复评配置（相对路径基于项目根目录）
+
+# 候选列表 JSON
+candidates: data/candidates/candidates_latest.json
+
+# 候选图表目录（其下按 pick_date 分目录）
+kline_dir: data/kline
+
+# 评分结果输出目录
+output_dir: data/review
+
+# 提示词文件
+prompt_path: agent/prompt.md
+
+# Kimi / Moonshot 模型名称
+model: kimi-k2.6
+
+# Moonshot OpenAI 兼容接口地址
+base_url: https://api.moonshot.ai/v1
+
+# 相邻 API 调用间隔（秒）
+request_delay: 5
+
+# true: 跳过已存在单股 JSON（断点续跑）
+skip_existing: false
+
+# 推荐最小分数门槛
+suggest_min_score: 4.0
