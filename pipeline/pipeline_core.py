@@ -59,13 +59,19 @@ def _prepare_worker(args: tuple) -> tuple[str, Optional[pd.DataFrame]]:
     if df.empty:
         return code, None
 
-    # turnover_n
+    # volume/activity features
     for col in ("open", "close", "volume"):
         if col not in df.columns:
             return code, None
     o, c, v = df["open"], df["close"], df["volume"]
-    df["signed_turnover"] = (o + c) / 2 * v
+    df["signed_turnover"] = (o + c) / 2 * v * 100
     df["turnover_n"] = df["signed_turnover"].rolling(n_turnover_days, min_periods=1).sum()
+    df["amount_ma5"] = df["signed_turnover"].rolling(5, min_periods=1).mean()
+    df["volume_ma5"] = v.rolling(5, min_periods=1).mean()
+    df["volume_ma20"] = v.rolling(20, min_periods=1).mean()
+    df["volume_ma200"] = v.rolling(200, min_periods=1).mean()
+    df["volume_activity_20"] = df["volume_ma20"] / df["volume_ma200"].replace(0, np.nan)
+    df["volume_dryup_5"] = df["volume_ma5"] / df["volume_ma20"].replace(0, np.nan)
 
     # set index
     df = df.set_index("date", drop=False)
@@ -273,26 +279,59 @@ class MarketDataPreparer:
 # =============================================================================
 
 class TopTurnoverPoolBuilder:
-    """按每日 turnover_n 跨市场排名，构建流动性池。"""
+    """按中期放量与短期缩量状态构建流动性/活跃度池。"""
 
-    def __init__(self, top_m: int) -> None:
+    def __init__(
+        self,
+        top_m: int,
+        *,
+        min_amount_ma5: float = 0.0,
+        min_activity_20: float = 1.2,
+        dryup_min: float = 0.35,
+        dryup_max: float = 0.8,
+        dryup_target: float = 0.55,
+    ) -> None:
         self.top_m = int(top_m)
+        self.min_amount_ma5 = float(min_amount_ma5)
+        self.min_activity_20 = float(min_activity_20)
+        self.dryup_min = float(dryup_min)
+        self.dryup_max = float(dryup_max)
+        self.dryup_target = float(dryup_target)
 
     def build(self, prepared: Dict[str, pd.DataFrame]) -> Dict[pd.Timestamp, List[str]]:
         if self.top_m <= 0:
             return {}
 
-        pool: Dict[pd.Timestamp, List[Tuple[float, str]]] = defaultdict(list)
+        pool: Dict[pd.Timestamp, List[Tuple[float, float, str]]] = defaultdict(list)
         for code, df in prepared.items():
-            for dt, val in df["turnover_n"].items():
-                pool[dt].append((float(val), code))
+            required = {
+                "amount_ma5",
+                "volume_activity_20",
+                "volume_dryup_5",
+            }
+            if not required.issubset(df.columns):
+                continue
+            for dt, row in df[list(required)].iterrows():
+                amount_ma5 = float(row["amount_ma5"])
+                activity_20 = float(row["volume_activity_20"])
+                dryup_5 = float(row["volume_dryup_5"])
+                if not all(np.isfinite(x) for x in (amount_ma5, activity_20, dryup_5)):
+                    continue
+                if amount_ma5 < self.min_amount_ma5:
+                    continue
+                if activity_20 < self.min_activity_20:
+                    continue
+                if not (self.dryup_min <= dryup_5 <= self.dryup_max):
+                    continue
+                dryup_distance = abs(dryup_5 - self.dryup_target)
+                pool[dt].append((activity_20, dryup_distance, code))
 
         top_codes_by_date: Dict[pd.Timestamp, List[str]] = {}
         for dt, lst in pool.items():
             if not lst:
                 continue
-            lst_sorted = sorted(lst, key=lambda x: x[0], reverse=True)[: self.top_m]
-            top_codes_by_date[dt] = [code for _, code in lst_sorted]
+            lst_sorted = sorted(lst, key=lambda x: (-x[0], x[1], x[2]))[: self.top_m]
+            top_codes_by_date[dt] = [code for _, _, code in lst_sorted]
         return top_codes_by_date
 
 

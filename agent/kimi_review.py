@@ -34,7 +34,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "output_dir": "data/review",
     "prompt_path": "agent/prompt.md",
     "model": "kimi-k2.6",
-    "base_url": "https://api.moonshot.ai/v1",
+    "base_url": "https://api.moonshot.cn/v1",
     "request_delay": 5,
     "skip_existing": False,
     "suggest_min_score": 4.0,
@@ -73,7 +73,7 @@ class KimiReviewer(BaseReviewer):
 
         self.client = OpenAI(
             api_key=api_key,
-            base_url=self.config.get("base_url", "https://api.moonshot.ai/v1"),
+            base_url=self.config.get("base_url", "https://api.moonshot.cn/v1"),
         )
 
     @staticmethod
@@ -93,7 +93,7 @@ class KimiReviewer(BaseReviewer):
 
         response = self.client.chat.completions.create(
             model=self.config.get("model", "kimi-k2.6"),
-            temperature=0.2,
+            temperature=1,
             messages=[
                 {"role": "system", "content": prompt},
                 {

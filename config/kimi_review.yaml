@@ -17,7 +17,7 @@ prompt_path: agent/prompt.md
 model: kimi-k2.6
 
 # Moonshot OpenAI 兼容接口地址
-base_url: https://api.moonshot.ai/v1
+base_url: https://api.moonshot.cn/v1
 
 # 相邻 API 调用间隔（秒）
 request_delay: 5

@@ -134,6 +134,7 @@ def _resolve_pick_date(
 def _calc_warmup(cfg: dict, buffer: int) -> int:
     """根据启用策略的参数计算最长所需 warmup bars."""
     warmup = 120
+    warmup = max(warmup, 200 + buffer)
 
     cfg_b1 = cfg.get("b1", {})
     if cfg_b1.get("enabled", True):
@@ -148,6 +149,17 @@ def _calc_warmup(cfg: dict, buffer: int) -> int:
         )
 
     return warmup
+
+
+def _volume_extra(row: pd.Series) -> dict:
+    """候选输出中附带量能池因子，便于复盘。"""
+    keys = ("amount_ma5", "volume_activity_20", "volume_dryup_5")
+    extra = {}
+    for key in keys:
+        val = row.get(key)
+        if val is not None and np.isfinite(float(val)):
+            extra[key] = float(val)
+    return extra
 
 
 # =============================================================================
@@ -191,6 +203,7 @@ def run_b1(
                     strategy="b1",
                     close=float(row["close"]),
                     turnover_n=float(row["turnover_n"]),
+                    extra=_volume_extra(row),
                 ))
         except Exception as exc:
             logger.debug("B1 skip %s: %s", code, exc)
@@ -261,6 +274,7 @@ def run_brick(
                     close=float(row["close"]),
                     turnover_n=float(row["turnover_n"]),
                     brick_growth=bg if np.isfinite(bg) else None,
+                    extra=_volume_extra(row),
                 ))
         except Exception as exc:
             logger.debug("Brick skip %s: %s", code, exc)
@@ -299,6 +313,7 @@ def run_preselect(
     top_m = int(g.get("top_m", 20))
     n_turnover_days = int(g.get("n_turnover_days", 43))
     min_bars_buffer = int(g.get("min_bars_buffer", 10))
+    volume_pool = g.get("volume_pool", {})
 
     # 1) 加载原始数据
     raw_data = load_raw_data(_data_dir, end_date=end_date)
@@ -320,7 +335,14 @@ def run_preselect(
     logger.info("选股日期: %s", pick_ts.date())
 
     # 5) 构建流动性池
-    pool_codes = TopTurnoverPoolBuilder(top_m=top_m).build(prepared).get(pick_ts, [])
+    pool_codes = TopTurnoverPoolBuilder(
+        top_m=top_m,
+        min_amount_ma5=float(volume_pool.get("min_amount_ma5", 0)),
+        min_activity_20=float(volume_pool.get("min_activity_20", 1.2)),
+        dryup_min=float(volume_pool.get("dryup_min", 0.35)),
+        dryup_max=float(volume_pool.get("dryup_max", 0.8)),
+        dryup_target=float(volume_pool.get("dryup_target", 0.55)),
+    ).build(prepared).get(pick_ts, [])
     if not pool_codes:
         logger.warning("流动性池为空，pick_date=%s", pick_ts.date())
         return pick_ts, []

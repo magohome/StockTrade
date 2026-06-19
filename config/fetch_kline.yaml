@@ -25,7 +25,7 @@ workers: 2
 
 # Tushare 限流保护：adj_factor 免费/常见权限为 200 次/分钟。
 # 0.4 秒约等于 150 次/分钟，给网络抖动和重试留余量。
-request_interval_seconds: 0.4
+request_interval_seconds: 1.0
 
 # true: 已存在且通过校验的 CSV 不重复抓取，便于断点续跑
 skip_existing: true

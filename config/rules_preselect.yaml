@@ -6,9 +6,21 @@
 global:
   data_dir: "./data/raw"          # A股日线CSV目录
   output_dir: "./data/candidates" # 候选结果输出目录
-  top_m: 5000                     # 流动性池：取成交额最高的 top_m 只
-  n_turnover_days: 43             # 滚动成交额窗口（日）
+  top_m: 1500                     # 活跃缩量池：取评分最高的 top_m 只
+  n_turnover_days: 43             # 保留给候选输出的滚动成交额窗口（日）
   min_bars_buffer: 10             # 额外的最小 bar 缓冲
+
+  # 活跃缩量池：
+  # 1) 近20日均量 / 近200日均量 >= min_activity_20，代表中期有资金活跃
+  # 2) dryup_min <= 近5日均量 / 近20日均量 <= dryup_max，代表短期缩量整理
+  # 3) 近5日估算平均成交额 >= min_amount_ma5，用于排除绝对流动性太差的票
+  # 排序优先级：activity_20 越高越靠前，其次 dryup_5 越接近 dryup_target 越靠前。
+  volume_pool:
+    min_amount_ma5: 0             # 估算成交额门槛；如需约5000万，可设 50000000
+    min_activity_20: 1.2
+    dryup_min: 0.35
+    dryup_max: 0.8
+    dryup_target: 0.55
 
 # ── B1 策略参数（KDJ + 知行均线多头排列） ────────────────────────────
 b1:
