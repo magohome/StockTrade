@@ -212,8 +212,10 @@ def main() -> None:
     }
     existing_latest = [d for d in local_latest.values() if d is not None]
     global_latest = max(existing_latest) if existing_latest else None
+    has_new_market_dates = True
     if global_latest is not None:
         missing_market_dates = _market_open_dates(_next_day_yyyymmdd(global_latest), end)
+        has_new_market_dates = bool(missing_market_dates)
         logger.info(
             "本地整体最新交易日：%s；到 %s 缺少交易日：%s",
             global_latest.date(),
@@ -227,6 +229,8 @@ def main() -> None:
             tasks.append(IncrementalTask(code=code, start=start_full, end=end, mode="missing_stock"))
             continue
         if latest.strftime("%Y%m%d") < end:
+            if global_latest is not None and latest >= global_latest and not has_new_market_dates:
+                continue
             tasks.append(IncrementalTask(code=code, start=_next_day_yyyymmdd(latest), end=end, mode="incremental"))
 
     missing_count = sum(1 for t in tasks if t.mode == "missing_stock")
